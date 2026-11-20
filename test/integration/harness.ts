@@ -2,7 +2,7 @@
  * Integration test harness for pi-interactive-subagents.
  *
  * Provides utilities to:
- * - Detect available mux backends (cmux, tmux, zellij)
+ * - Detect available mux backends (Herdr, cmux, tmux, zellij)
  * - Create isolated test environments with test agent definitions
  * - Start real pi sessions in mux surfaces
  * - Poll for file creation and screen output
@@ -89,7 +89,7 @@ export function getAvailableBackends(): MuxBackend[] {
   const backends: MuxBackend[] = [];
   const orig = process.env.PI_SUBAGENT_MUX;
 
-  for (const backend of ["cmux", "tmux", "zellij"] as MuxBackend[]) {
+  for (const backend of ["herdr", "cmux", "tmux", "zellij"] as MuxBackend[]) {
     process.env.PI_SUBAGENT_MUX = backend;
     try {
       if (getMuxBackend() === backend) backends.push(backend);
@@ -130,6 +130,17 @@ export function focusSurface(backend: MuxBackend, surface: string): void {
 }
 
 export function getFocusedSurface(backend: MuxBackend): string | null {
+  if (backend === "herdr") {
+    try {
+      const output = execFileSync("herdr", ["pane", "list"], { encoding: "utf8" });
+      const parsed = JSON.parse(output) as { result?: { panes?: Array<any> } };
+      const focused = parsed.result?.panes?.find((pane) => pane.focused === true);
+      return typeof focused?.pane_id === "string" ? focused.pane_id : null;
+    } catch {
+      return null;
+    }
+  }
+
   if (backend === "cmux") {
     const info = execFileSync("cmux", ["identify", "--json"], { encoding: "utf8" });
     return parseCmuxFocusedSnapshotFromJson(info)?.surfaceRef ?? null;
@@ -151,6 +162,8 @@ export function getFocusedSurface(backend: MuxBackend): string | null {
 }
 
 export function getSurfacePane(backend: MuxBackend, surface: string): string | null {
+  if (backend === "herdr") return surface;
+
   if (backend === "cmux") {
     const info = execFileSync("cmux", ["identify", "--surface", surface], { encoding: "utf8" });
     return parseCmuxPaneRefForSurfaceFromJson(info, surface);

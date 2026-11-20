@@ -19,8 +19,11 @@ import {
 
 import {
   shellEscape,
+  isHerdrAvailable,
   isCmuxAvailable,
   isWezTermAvailable,
+  parseHerdrCreatedPaneId,
+  selectHerdrSplitDirection,
   parseCmuxFocusedSnapshot,
   parseCmuxFocusedSnapshotFromJson,
   parseCmuxJson,
@@ -2205,6 +2208,58 @@ describe("cmux.ts", () => {
         ),
         "pane:4",
       );
+    });
+  });
+
+  describe("Herdr", () => {
+    it("parses the created pane ID from a pane split response", () => {
+      assert.equal(
+        parseHerdrCreatedPaneId({ result: { pane: { pane_id: "w1:p7" } } }),
+        "w1:p7",
+      );
+    });
+
+    it("rejects malformed or empty pane split responses", () => {
+      assert.equal(parseHerdrCreatedPaneId(null), null);
+      assert.equal(parseHerdrCreatedPaneId({ result: { pane: {} } }), null);
+      assert.equal(parseHerdrCreatedPaneId({ result: { pane: { pane_id: "" } } }), null);
+    });
+
+    it("splits the calling pane right when it is wide", () => {
+      const layout = {
+        result: {
+          layout: {
+            area: { width: 1, height: 1 },
+            focused_pane_id: "w1:p2",
+            panes: [
+              { pane_id: "w1:p1", rect: { width: 180, height: 50 } },
+              { pane_id: "w1:p2", rect: { width: 40, height: 50 } },
+            ],
+          },
+        },
+      };
+      assert.equal(selectHerdrSplitDirection(layout, "w1:p1"), "right");
+    });
+
+    it("splits narrow or tall calling panes down instead of trusting focus", () => {
+      const layout = {
+        result: {
+          layout: {
+            area: { width: 200, height: 50 },
+            focused_pane_id: "w1:p2",
+            panes: [
+              { pane_id: "w1:p1", rect: { width: 60, height: 50 } },
+              { pane_id: "w1:p2", rect: { width: 200, height: 50 } },
+            ],
+          },
+        },
+      };
+      assert.equal(selectHerdrSplitDirection(layout, "w1:p1"), "down");
+      assert.equal(selectHerdrSplitDirection(layout, "w1:p3"), "right");
+    });
+
+    it("reports Herdr availability as a boolean", () => {
+      assert.equal(typeof isHerdrAvailable(), "boolean");
     });
   });
 

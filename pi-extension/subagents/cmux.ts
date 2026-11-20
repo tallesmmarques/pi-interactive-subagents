@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 
 const execFileAsync = promisify(execFile);
 
-export type MuxBackend = "cmux" | "tmux" | "zellij" | "wezterm";
+export type MuxBackend = "herdr" | "cmux" | "tmux" | "zellij" | "wezterm";
 
 const commandAvailability = new Map<string, boolean>();
 
@@ -43,8 +43,20 @@ function hasCommand(command: string): boolean {
 
 function muxPreference(): MuxBackend | null {
   const pref = (process.env.PI_SUBAGENT_MUX ?? "").trim().toLowerCase();
-  if (pref === "cmux" || pref === "tmux" || pref === "zellij" || pref === "wezterm") return pref;
+  if (
+    pref === "herdr" ||
+    pref === "cmux" ||
+    pref === "tmux" ||
+    pref === "zellij" ||
+    pref === "wezterm"
+  ) {
+    return pref;
+  }
   return null;
+}
+
+function isHerdrRuntimeAvailable(): boolean {
+  return process.env.HERDR_ENV === "1" && hasCommand("herdr");
 }
 
 function isCmuxRuntimeAvailable(): boolean {
@@ -61,6 +73,10 @@ function isZellijRuntimeAvailable(): boolean {
 
 function isWezTermRuntimeAvailable(): boolean {
   return !!process.env.WEZTERM_UNIX_SOCKET && hasCommand("wezterm");
+}
+
+export function isHerdrAvailable(): boolean {
+  return isHerdrRuntimeAvailable();
 }
 
 export function isCmuxAvailable(): boolean {
@@ -81,11 +97,13 @@ export function isWezTermAvailable(): boolean {
 
 export function getMuxBackend(): MuxBackend | null {
   const pref = muxPreference();
+  if (pref === "herdr") return isHerdrRuntimeAvailable() ? "herdr" : null;
   if (pref === "cmux") return isCmuxRuntimeAvailable() ? "cmux" : null;
   if (pref === "tmux") return isTmuxRuntimeAvailable() ? "tmux" : null;
   if (pref === "zellij") return isZellijRuntimeAvailable() ? "zellij" : null;
   if (pref === "wezterm") return isWezTermRuntimeAvailable() ? "wezterm" : null;
 
+  if (isHerdrRuntimeAvailable()) return "herdr";
   if (isCmuxRuntimeAvailable()) return "cmux";
   if (isTmuxRuntimeAvailable()) return "tmux";
   if (isZellijRuntimeAvailable()) return "zellij";
@@ -99,6 +117,9 @@ export function isMuxAvailable(): boolean {
 
 export function muxSetupHint(): string {
   const pref = muxPreference();
+  if (pref === "herdr") {
+    return "Start pi inside a Herdr-managed pane.";
+  }
   if (pref === "cmux") {
     return "Start pi inside cmux (`cmux pi`).";
   }
@@ -111,7 +132,7 @@ export function muxSetupHint(): string {
   if (pref === "wezterm") {
     return "Start pi inside WezTerm.";
   }
-  return "Start pi inside cmux (`cmux pi`), tmux (`tmux new -A -s pi 'pi'`), zellij (`zellij --session pi`, then run `pi`), or WezTerm.";
+  return "Start pi inside Herdr, cmux (`cmux pi`), tmux (`tmux new -A -s pi 'pi'`), zellij (`zellij --session pi`, then run `pi`), or WezTerm.";
 }
 
 function requireMuxBackend(): MuxBackend {
@@ -197,6 +218,104 @@ async function zellijActionAsync(args: string[], surface?: string): Promise<stri
     env: zellijEnv(surface),
   });
   return stdout;
+}
+
+/** Herdr pane and layout responses used to create sibling subagent panes. */
+export function parseHerdrCreatedPaneId(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const result = (value as { result?: unknown }).result;
+  if (!result || typeof result !== "object") return null;
+  const pane = (result as { pane?: unknown }).pane;
+  if (!pane || typeof pane !== "object") return null;
+  const paneId = (pane as { pane_id?: unknown }).pane_id;
+  return nonEmptyString(paneId) ? paneId : null;
+}
+
+export function selectHerdrSplitDirection(
+  value: unknown,
+  callerPaneId = process.env.HERDR_PANE_ID,
+): "right" | "down" {
+  if (!value || typeof value !== "object") return "right";
+  const result = (value as { result?: unknown }).result;
+  if (!result || typeof result !== "object") return "right";
+  const layout = (result as { layout?: unknown }).layout;
+  if (!layout || typeof layout !== "object") return "right";
+
+  const record = layout as {
+    area?: { width?: unknown; height?: unknown };
+    focused_pane_id?: unknown;
+    panes?: unknown;
+  };
+  const panes = Array.isArray(record.panes) ? record.panes : [];
+  const caller = panes.find(
+    (candidate) =>
+      candidate &&
+      typeof candidate === "object" &&
+      (candidate as { pane_id?: unknown }).pane_id === callerPaneId,
+  );
+  const focused = panes.find(
+    (candidate) =>
+      candidate &&
+      typeof candidate === "object" &&
+      (candidate as { pane_id?: unknown }).pane_id === record.focused_pane_id,
+  );
+  const pane = caller ?? focused;
+  const rect =
+    pane && typeof pane === "object"
+      ? (pane as { rect?: { width?: unknown; height?: unknown } }).rect
+      : undefined;
+  const dimensions = rect ?? record.area;
+  const width = typeof dimensions?.width === "number" ? dimensions.width : 0;
+  const height = typeof dimensions?.height === "number" ? dimensions.height : 0;
+
+  // Terminal rows are taller than columns. Split wide panes right and narrow
+  // or tall panes down, while always splitting the original calling pane.
+  return width >= height * 2 ? "right" : "down";
+}
+
+function createHerdrSplitSurface(
+  name: string,
+  direction: "left" | "right" | "up" | "down",
+  fromSurface?: string,
+): string {
+  const args = ["pane", "split"];
+  if (fromSurface) args.push("--pane", fromSurface);
+  else args.push("--current");
+  args.push(
+    "--direction",
+    direction === "up" || direction === "down" ? "down" : "right",
+    "--cwd",
+    process.cwd(),
+    "--no-focus",
+  );
+
+  const output = execFileSync("herdr", args, { encoding: "utf8" });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error(`Unexpected herdr pane split output: ${output}`);
+  }
+  const paneId = parseHerdrCreatedPaneId(parsed);
+  if (!paneId) throw new Error(`Unexpected herdr pane split output: ${output}`);
+
+  try {
+    execFileSync("herdr", ["pane", "rename", paneId, name], { encoding: "utf8" });
+  } catch {
+    // Optional -- pane labels are cosmetic.
+  }
+  return paneId;
+}
+
+function createHerdrSurface(name: string): string {
+  let direction: "right" | "down" = "right";
+  try {
+    const output = execFileSync("herdr", ["pane", "layout", "--current"], { encoding: "utf8" });
+    direction = selectHerdrSplitDirection(JSON.parse(output));
+  } catch {
+    // Fall back to the traditional right split if layout inspection fails.
+  }
+  return createHerdrSplitSurface(name, direction);
 }
 
 /** Tracked subagent pane for cmux — reused across subagent launches. */
@@ -754,6 +873,10 @@ function createCmuxSplitSurface(
 export function createSurface(name: string): string {
   const backend = getMuxBackend();
 
+  if (backend === "herdr") {
+    return createHerdrSurface(name);
+  }
+
   if (backend === "cmux" && cmuxSubagentPane) {
     // Verify the pane still exists before adding a tab to it
     try {
@@ -818,6 +941,10 @@ export function createSurfaceSplit(
   fromSurface?: string,
 ): string {
   const backend = requireMuxBackend();
+
+  if (backend === "herdr") {
+    return createHerdrSplitSurface(name, direction, fromSurface);
+  }
 
   if (backend === "cmux") {
     return createCmuxSplitSurface(name, direction, fromSurface).surface;
@@ -910,6 +1037,13 @@ export function createSurfaceSplit(
 export function renameCurrentTab(title: string): void {
   const backend = requireMuxBackend();
 
+  if (backend === "herdr") {
+    const tabId = process.env.HERDR_TAB_ID;
+    if (!tabId) throw new Error("HERDR_TAB_ID not set");
+    execFileSync("herdr", ["tab", "rename", tabId, title], { encoding: "utf8" });
+    return;
+  }
+
   if (backend === "cmux") {
     const surfaceId = process.env.CMUX_SURFACE_ID;
     if (!surfaceId) throw new Error("CMUX_SURFACE_ID not set");
@@ -957,6 +1091,13 @@ export function renameCurrentTab(title: string): void {
  */
 export function renameWorkspace(title: string): void {
   const backend = requireMuxBackend();
+
+  if (backend === "herdr") {
+    const workspaceId = process.env.HERDR_WORKSPACE_ID;
+    if (!workspaceId) throw new Error("HERDR_WORKSPACE_ID not set");
+    execFileSync("herdr", ["workspace", "rename", workspaceId, title], { encoding: "utf8" });
+    return;
+  }
 
   if (backend === "cmux") {
     execSync(`cmux workspace-action --action rename --title ${shellEscape(title)}`, {
@@ -1011,6 +1152,11 @@ export function renameWorkspace(title: string): void {
 export function sendCommand(surface: string, command: string): void {
   const backend = requireMuxBackend();
 
+  if (backend === "herdr") {
+    execFileSync("herdr", ["pane", "run", surface, command], { encoding: "utf8" });
+    return;
+  }
+
   if (backend === "cmux") {
     execSync(`cmux send --surface ${shellEscape(surface)} ${shellEscape(command + "\n")}`, {
       encoding: "utf8",
@@ -1042,6 +1188,11 @@ export function sendCommand(surface: string, command: string): void {
  */
 export function sendEscape(surface: string): void {
   const backend = requireMuxBackend();
+
+  if (backend === "herdr") {
+    execFileSync("herdr", ["pane", "send-keys", surface, "esc"], { encoding: "utf8" });
+    return;
+  }
 
   if (backend === "cmux") {
     execFileSync("cmux", ["send", "--surface", surface, "\u001b"], { encoding: "utf8" });
@@ -1107,6 +1258,14 @@ export function sendLongCommand(
 export function readScreen(surface: string, lines = 50): string {
   const backend = requireMuxBackend();
 
+  if (backend === "herdr") {
+    return execFileSync(
+      "herdr",
+      ["pane", "read", surface, "--source", "recent-unwrapped", "--lines", String(lines)],
+      { encoding: "utf8" },
+    );
+  }
+
   if (backend === "cmux") {
     return execSync(`cmux read-screen --surface ${shellEscape(surface)} --lines ${lines}`, {
       encoding: "utf8",
@@ -1150,6 +1309,15 @@ export function readScreen(surface: string, lines = 50): string {
 export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
   const backend = requireMuxBackend();
 
+  if (backend === "herdr") {
+    const { stdout } = await execFileAsync(
+      "herdr",
+      ["pane", "read", surface, "--source", "recent-unwrapped", "--lines", String(lines)],
+      { encoding: "utf8" },
+    );
+    return stdout;
+  }
+
   if (backend === "cmux") {
     const { stdout } = await execFileAsync(
       "cmux",
@@ -1192,6 +1360,11 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
  */
 export function closeSurface(surface: string): void {
   const backend = requireMuxBackend();
+
+  if (backend === "herdr") {
+    execFileSync("herdr", ["pane", "close", surface], { encoding: "utf8" });
+    return;
+  }
 
   if (backend === "cmux") {
     execSync(`cmux close-surface --surface ${shellEscape(surface)}`, {

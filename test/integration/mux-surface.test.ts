@@ -6,6 +6,7 @@
  * No LLM calls — fast and free.
  *
  * Run inside a supported multiplexer:
+ *   herdr  # then run: npm run test:integration
  *   cmux bash -c 'npm run test:integration'
  *   tmux new 'npm run test:integration'
  *   zellij --session pi  # then run: npm run test:integration
@@ -45,7 +46,7 @@ const FOCUS_TEST_SHELL_READY_DELAY_MS = Number(process.env.PI_SUBAGENT_SHELL_REA
 
 if (backends.length === 0) {
   console.log("⚠️  No mux backend available — skipping mux-surface integration tests");
-  console.log("   Run inside cmux or tmux to enable these tests.");
+  console.log("   Run inside Herdr, cmux, tmux, or zellij to enable these tests.");
 }
 
 for (const backend of backends) {
@@ -64,11 +65,19 @@ for (const backend of backends) {
     });
 
     it("keeps focus on the active surface while creating and targeting subagent surfaces", async () => {
-      const anchor = createTrackedSurfaceSplit(env, "focus-anchor", "right");
+      // Herdr explicitly targets the calling pane and supports --no-focus.
+      // The other backends create an anchor and focus it before exercising
+      // their own focus-preservation behavior.
+      const anchor = backend === "herdr"
+        ? process.env.HERDR_PANE_ID
+        : createTrackedSurfaceSplit(env, "focus-anchor", "right");
+      assert.ok(anchor, "Expected HERDR_PANE_ID for Herdr integration tests");
       await sleep(1000);
 
-      focusSurface(backend, anchor);
-      await waitForFocusedSurface(backend, anchor, 10_000);
+      if (backend !== "herdr") {
+        focusSurface(backend, anchor);
+        await waitForFocusedSurface(backend, anchor, 10_000);
+      }
 
       const childA = createTrackedSurface(env, "focus-child-a");
       await sleep(FOCUS_TEST_SHELL_READY_DELAY_MS);
